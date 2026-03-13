@@ -1,0 +1,22 @@
+-- FollowToken.lua
+-- Script RPG Cinematográfico (RE Style) + Registro de Troca
+function onLoad()
+    print("Sistema RPG carregado no token: " .. self.getGUID())
+    
+    -- Registro Automático no Sistema Global para troca de personagens
+    Global.call("registerToken", {guid = self.getGUID()})
+    
+    -- Opção para ativação manual
+    self.addContextMenuItem("Modo RPG: On/Off", function(p_color)
+        Global.call("toggleFollowCamera", {player_color = p_color, target_guid = self.getGUID()})
+    end)
+    
+    -- Atalho para voltar para visão de jogo padrão do TTS
+    self.addContextMenuItem("Resetar Câmera", function(p_color)
+        Player[p_color].lookAt({position = {0, 0, 0}, pitch = 45, yaw = 0, distance = 40})
+    end)
+end
+function onDestroy()
+    -- Remove o token da lista de troca ao ser deletado
+    Global.call("unregisterToken", {guid = self.getGUID()})
+end
