@@ -1,0 +1,145 @@
+-- Global.lua
+-- Sistema TTRPG V7: CINEMATIC 3RD PERSON + TROCA DE PERSONAGENS
+-- Configurações de Câmera e Movimento
+CameraRPG = {
+    active = false,
+    target_guid = nil,
+    player_color = nil,
+    -- Offset ajustado: x=0.7, y=-3, z=8
+    offset = {x = 0.7, y = -3, z = 8},
+    pitch = 10,
+    lerpSpeed = 0.35,     -- Aumentado para manter o token centralizado
+    currentPos = {0,0,0},
+    currentYaw = 0
+}
+MoveConfig = {
+    speed = 0.06,
+    rotSpeed = 1.2,       -- Reduzido para ser menos violento
+    liftSpeed = 0.1
+}
+-- Registro de Personagens
+RegisteredTokens = {}
+CurrentTokenIndex = 1
+-- Estado das teclas (WASD + Ctrl + Troca)
+KeysPressed = {}
+function onLoad()
+    log(">>> Sistema RPG (RE Style) + Troca de Tokens Ativo <<<")
+    Wait.time(gameLoop, 0.02, -1)
+end
+-- Sistema de Registro
+function registerToken(params)
+    if not params or not params.guid then return end
+    for _, guid in ipairs(RegisteredTokens) do
+        if guid == params.guid then return end
+    end
+    table.insert(RegisteredTokens, params.guid)
+    log("Token Registrado para Troca: " .. params.guid)
+end
+function unregisterToken(params)
+    if not params or not params.guid then return end
+    for i, guid in ipairs(RegisteredTokens) do
+        if guid == params.guid then
+            table.remove(RegisteredTokens, i)
+            log("Token Removido: " .. params.guid)
+            break
+        end
+    end
+end
+-- Rastreamento de teclas 
+function onScriptingButtonDown(index, player_color)
+    if not KeysPressed[player_color] then KeysPressed[player_color] = {} end
+    KeysPressed[player_color][index] = true
+    
+    -- Troca de Token (7 = Anterior, 8 = Próximo)
+    if index == 7 then cycleToken(player_color, -1) end
+    if index == 8 then cycleToken(player_color, 1) end
+end
+function onScriptingButtonUp(index, player_color)
+    if not KeysPressed[player_color] then KeysPressed[player_color] = {} end
+    KeysPressed[player_color][index] = false
+end
+function cycleToken(player_color, direction)
+    if #RegisteredTokens == 0 then return end
+    
+    CurrentTokenIndex = CurrentTokenIndex + direction
+    if CurrentTokenIndex > #RegisteredTokens then CurrentTokenIndex = 1 end
+    if CurrentTokenIndex < 1 then CurrentTokenIndex = #RegisteredTokens end
+    
+    local next_guid = RegisteredTokens[CurrentTokenIndex]
+    toggleFollowCamera({player_color = player_color, target_guid = next_guid}, true)
+end
+-- Loop Principal
+function gameLoop()
+    processMovement()
+    updateCameraRPG()
+end
+function processMovement()
+    if not CameraRPG.active or not CameraRPG.player_color then return end
+    
+    local p_color = CameraRPG.player_color
+    if not KeysPressed[p_color] then return end
+    
+    local target = getObjectFromGUID(CameraRPG.target_guid)
+    if not target then return end
+    local pos = target.getPosition()
+    local rot = target.getRotation()
+    local forward = target.getTransformForward()
+    
+    if KeysPressed[p_color][1] then target.setPosition({pos.x + forward.x * MoveConfig.speed, pos.y, pos.z + forward.z * MoveConfig.speed}); pos = target.getPosition() end
+    if KeysPressed[p_color][2] then target.setPosition({pos.x - forward.x * MoveConfig.speed, pos.y, pos.z - forward.z * MoveConfig.speed}); pos = target.getPosition() end
+    if KeysPressed[p_color][3] then target.setRotation({rot.x, rot.y - MoveConfig.rotSpeed, rot.z}) end
+    if KeysPressed[p_color][4] then target.setRotation({rot.x, rot.y + MoveConfig.rotSpeed, rot.z}) end
+    if KeysPressed[p_color][6] then target.setPosition({pos.x, pos.y + MoveConfig.liftSpeed, pos.z}) end
+end
+function updateCameraRPG()
+    if not CameraRPG.active or not CameraRPG.target_guid or not CameraRPG.player_color then return end
+    
+    local target = getObjectFromGUID(CameraRPG.target_guid)
+    if not target then
+        CameraRPG.active = false
+        return
+    end
+    local pos = target.getPosition()
+    local rot = target.getRotation()
+    
+    local angle = math.rad(rot.y)
+    local offsetX = CameraRPG.offset.z * math.sin(angle) + CameraRPG.offset.x * math.cos(angle)
+    local offsetZ = CameraRPG.offset.z * math.cos(angle) - CameraRPG.offset.x * math.sin(angle)
+    
+    local targetPos = {pos.x + offsetX, pos.y + CameraRPG.offset.y, pos.z + offsetZ}
+    
+    if CameraRPG.currentPos[1] == 0 then CameraRPG.currentPos = targetPos end
+    for i=1,3 do
+        CameraRPG.currentPos[i] = CameraRPG.currentPos[i] + (targetPos[i] - CameraRPG.currentPos[i]) * CameraRPG.lerpSpeed
+    end
+    
+    local diff = rot.y - CameraRPG.currentYaw
+    if diff > 180 then diff = diff - 360 elseif diff < -180 then diff = diff + 360 end
+    CameraRPG.currentYaw = CameraRPG.currentYaw + diff * CameraRPG.lerpSpeed
+    Player[CameraRPG.player_color].lookAt({
+        position = CameraRPG.currentPos,
+        pitch    = CameraRPG.pitch,
+        yaw      = CameraRPG.currentYaw,
+        distance = 0
+    })
+end
+-- Gerenciador de Ativação
+function toggleFollowCamera(params, force_on)
+    if not params or not params.player_color or not params.target_guid then return end
+    
+    if not force_on and CameraRPG.active and CameraRPG.target_guid == params.target_guid then
+        CameraRPG.active = false
+        broadcastToColor("Modo RPG: DESATIVADO", params.player_color, {1, 1, 1})
+    else
+        CameraRPG.active = true
+        CameraRPG.target_guid = params.target_guid
+        CameraRPG.player_color = params.player_color
+        
+        local t = getObjectFromGUID(params.target_guid)
+        if t then 
+            CameraRPG.currentPos = t.getPosition()
+            CameraRPG.currentYaw = t.getRotation().y 
+            broadcastToColor("Controlando: " .. t.getName(), params.player_color, {0, 1, 0})
+        end
+    end
+end
