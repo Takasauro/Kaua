@@ -1,145 +1,401 @@
 -- Global.lua
--- Sistema TTRPG V7: CINEMATIC 3RD PERSON + TROCA DE PERSONAGENS
--- Configurações de Câmera e Movimento
-CameraRPG = {
+-- Sistema TTRPG V20: NUCLEO REFINADO (COMBATE + SKINS + PARTY)
+if not RPG_System then RPG_System = {} end
+-- 1. Estruturas Base
+RPG_System.Camera = {
     active = false,
     target_guid = nil,
     player_color = nil,
-    -- Offset ajustado: x=0.7, y=-3, z=8
     offset = {x = 0.7, y = -3, z = 8},
     pitch = 10,
-    lerpSpeed = 0.35,     -- Aumentado para manter o token centralizado
+    lerpSpeed = 0.35,
     currentPos = {0,0,0},
     currentYaw = 0
 }
-MoveConfig = {
+RPG_System.MoveConfig = {
     speed = 0.06,
-    rotSpeed = 1.2,       -- Reduzido para ser menos violento
+    rotSpeed = 1.2,
     liftSpeed = 0.1
 }
--- Registro de Personagens
-RegisteredTokens = {}
-CurrentTokenIndex = 1
--- Estado das teclas (WASD + Ctrl + Troca)
-KeysPressed = {}
-function onLoad()
-    log(">>> Sistema RPG (RE Style) + Troca de Tokens Ativo <<<")
-    Wait.time(gameLoop, 0.02, -1)
+RPG_System.RegisteredTokens = {}
+RPG_System.KeysPressed = {}
+RPG_System.Party = {} 
+RPG_System.SkinData = {} -- SkinData[guid] = { skins = {{name, front, back}}, index = 1 }
+RPG_System.SkinUI = { activeFor = nil, guid = nil, name = "", front = "", back = "" }
+RPG_System.Combat = {
+    active = false,
+    initiativeList = {},
+    currentTurnIndex = 1,
+    maxMovement = 30,
+    currentMovement = 0,
+    lastPos = nil
+}
+local FollowTokenCode = [[
+-- FollowToken.lua
+-- Sistema TTRPG V17: Token de RPG + Party + Skins (Gerenciador)
+function onLoad(save_state)
+    local myGUID = self.getGUID()
+    local oldGUID = self.getMemo()
+    if oldGUID ~= "" and oldGUID ~= myGUID then
+        Global.call("registerToken", {guid = myGUID, old_guid = oldGUID})
+        self.setMemo("")
+    else
+        Global.call("registerToken", {guid = myGUID})
+    end
+    self.addContextMenuItem("Modo RPG: On/Off", function(p) Global.call("toggleFollowCamera", {player_color = p, target_guid = self.getGUID()}) end)
+    self.addContextMenuItem("Adicionar à Iniciativa", function() Global.call("addIdToInitiative", {guid = self.getGUID()}) end)
+    self.addContextMenuItem("Juntar ao Grupo (Party)", function() Global.call("addToParty", {guid = self.getGUID()}) end)
+    self.addContextMenuItem("Separar do Grupo", function() Global.call("removeFromParty", {guid = self.getGUID()}) end)
+    self.addContextMenuItem("Adicionar Nova Skin", function(p) Global.call("openSkinPanel", {color = p, guid = self.getGUID()}) end)
+    self.addContextMenuItem("Gerenciar Skins", function(p) Global.call("openSkinManager", {color = p, guid = self.getGUID()}) end)
 end
--- Sistema de Registro
+function prepareMigration() self.setMemo(self.getGUID()) end
+]]
+function onLoad()
+    print(">>> Sistema V20: Nucleo RPG Refinado <<<")
+    createUIPanels()
+    Wait.time(function() pcall(gameLoop) end, 0.02, -1)
+end
+-- =========================================================
+-- SISTEMA DE REGISTRO E MIGRAÇÃO
+-- =========================================================
 function registerToken(params)
     if not params or not params.guid then return end
-    for _, guid in ipairs(RegisteredTokens) do
-        if guid == params.guid then return end
-    end
-    table.insert(RegisteredTokens, params.guid)
-    log("Token Registrado para Troca: " .. params.guid)
+    local newGUID = params.guid
+    local oldGUID = params.old_guid
+    if oldGUID and oldGUID ~= newGUID then migrateGUID(oldGUID, newGUID) end
+    for _, guid in ipairs(RPG_System.RegisteredTokens) do if guid == newGUID then return end end
+    table.insert(RPG_System.RegisteredTokens, newGUID)
+end
+function migrateGUID(old, new)
+    if RPG_System.Camera.target_guid == old then RPG_System.Camera.target_guid = new end
+    for i, g in ipairs(RPG_System.Combat.initiativeList) do if g == old then RPG_System.Combat.initiativeList[i] = new end end
+    for i, g in ipairs(RPG_System.Party) do if g == old then RPG_System.Party[i] = new end end
+    if RPG_System.SkinData[old] then RPG_System.SkinData[new] = RPG_System.SkinData[old]; RPG_System.SkinData[old] = nil end
+    for i, g in ipairs(RPG_System.RegisteredTokens) do if g == old then RPG_System.RegisteredTokens[i] = new; break end end
 end
 function unregisterToken(params)
     if not params or not params.guid then return end
-    for i, guid in ipairs(RegisteredTokens) do
-        if guid == params.guid then
-            table.remove(RegisteredTokens, i)
-            log("Token Removido: " .. params.guid)
-            break
-        end
+    for i, guid in ipairs(RPG_System.RegisteredTokens) do if guid == params.guid then table.remove(RPG_System.RegisteredTokens, i); break end end
+    removeIdFromInitiative(params)
+    removeFromParty(params)
+end
+-- =========================================================
+-- INTERFACE GRÁFICA (UI)
+-- =========================================================
+function createUIPanels()
+    local ui_xml = [[
+    <Panel id="CombatPanel" width="220" height="160" position="-300 -20" rectAlignment="MiddleRight" color="#222222EE" allowDragging="true" returnToOriginalPositionWhenReleased="false">
+        <VerticalLayout padding="10 10 10 10" spacing="5">
+            <Text id="TitleTxt" text="Modo Combate: Inativo" color="#AAAAAA" fontSize="14" fontStyle="Bold" alignment="MiddleCenter"/>
+            <Text id="ActiveCharTxt" text="Vez de: --" color="#00CCFF" fontSize="12" fontStyle="Bold" alignment="MiddleCenter" active="false"/>
+            <HorizontalLayout spacing="5" flexibleHeight="1">
+                <Text text="Passos Max:" color="#FFFFFF" fontSize="12" alignment="MiddleRight" preferredWidth="110"/>
+                <InputField id="MaxMoveInput" text="30" characterValidation="Integer" onEndEdit="onUpdateMaxMove" preferredWidth="60"/>
+            </HorizontalLayout>
+            <Text id="MoveTrackerTxt" text="Gasto: 0 / 30" color="#55FF55" fontSize="14" alignment="MiddleCenter"/>
+            <HorizontalLayout spacing="5" flexibleHeight="1">
+                <Button id="ToggleCombatBtn" text="Iniciar" color="#44AA44" textColor="#FFFFFF" onClick="toggleCombatMode"/>
+                <Button id="EndTurnBtn" text="Proximo" color="#AA4444" textColor="#FFFFFF" onClick="endTurn" interactable="false"/>
+            </HorizontalLayout>
+        </VerticalLayout>
+    </Panel>
+    <Panel id="SkinPanel" active="false" width="350" height="250" position="0 -20" rectAlignment="MiddleCenter" color="#1A1A1AEE" allowDragging="true">
+        <VerticalLayout padding="15 15 15 15" spacing="10">
+            <Text text="Nova Skin (Traje Alternativo)" color="#FFCC00" fontSize="16" fontStyle="Bold" alignment="MiddleCenter"/>
+            <InputField id="SkinNameInput" placeholder="Nome da Skin (ex: Armadura de Ferro)..." onEndEdit="onEditName" preferredWidth="310" preferredHeight="35"/>
+            <InputField id="SkinFrontInput" placeholder="URL ou Imagem Frente..." onEndEdit="onEditFront" preferredWidth="310" preferredHeight="30"/>
+            <InputField id="SkinBackInput" placeholder="URL ou Imagem Costas..." onEndEdit="onEditBack" preferredWidth="310" preferredHeight="30"/>
+            <HorizontalLayout spacing="10" flexibleHeight="1">
+                <Button text="Salvar" color="#339933" textColor="#FFFFFF" onClick="submitAddSkin"/>
+                <Button text="Cancelar" color="#993333" textColor="#FFFFFF" onClick="cancelAddSkin"/>
+            </HorizontalLayout>
+        </VerticalLayout>
+    </Panel>
+    <Panel id="SkinManagerPanel" active="false" width="450" height="400" position="0 0" rectAlignment="MiddleCenter" color="#1A1A1AEE" allowDragging="true">
+        <VerticalLayout padding="10" spacing="10">
+            <Text text="Gerenciador de Skins" color="#FFCC00" fontSize="18" fontStyle="Bold"/>
+            <ScrollView id="SkinListScroll" height="280">
+                <VerticalLayout id="SkinListContainer" spacing="5">
+                    <!-- Conteúdo Gerado Dinamicamente -->
+                </VerticalLayout>
+            </ScrollView>
+            <Button text="Fechar Gerenciador" color="#993333" textColor="#FFFFFF" onClick="closeSkinManager"/>
+        </VerticalLayout>
+    </Panel>
+    ]]
+    UI.setXml(ui_xml)
+end
+function updateUI()
+    local c = RPG_System.Combat
+    if c.active then
+        local activeGUID = c.initiativeList[c.currentTurnIndex]
+        local activeObj = getObjectFromGUID(activeGUID)
+        local nameLabel = activeObj and activeObj.getName() or "Misterio"
+        
+        UI.setAttribute("TitleTxt", "text", "COMBATE")
+        UI.setAttribute("ActiveCharTxt", "active", "true")
+        UI.setAttribute("ActiveCharTxt", "text", "Vez de: " .. nameLabel)
+        UI.setAttribute("EndTurnBtn", "interactable", "true")
+        
+        local color = c.currentMovement >= c.maxMovement and "#FF5555" or "#55FF55"
+        UI.setAttribute("MoveTrackerTxt", "text", string.format("Gasto: %.1f / %d", c.currentMovement, c.maxMovement))
+        UI.setAttribute("MoveTrackerTxt", "color", color)
+    else
+        UI.setAttribute("TitleTxt", "text", "Modo Combate: OFF")
+        UI.setAttribute("ActiveCharTxt", "active", "false")
+        UI.setAttribute("EndTurnBtn", "interactable", "false")
+        UI.setAttribute("MoveTrackerTxt", "text", "Livre")
     end
 end
--- Rastreamento de teclas 
-function onScriptingButtonDown(index, player_color)
-    if not KeysPressed[player_color] then KeysPressed[player_color] = {} end
-    KeysPressed[player_color][index] = true
-    
-    -- Troca de Token (7 = Anterior, 8 = Próximo)
-    if index == 7 then cycleToken(player_color, -1) end
-    if index == 8 then cycleToken(player_color, 1) end
+-- =========================================================
+-- SISTEMA DE COMBATE (V20)
+-- =========================================================
+-- =========================================================
+-- LOGICA DE SKINS E GERENCIAMENTO
+-- =========================================================
+function openSkinPanel(params)
+    RPG_System.SkinUI.activeFor = params.color
+    RPG_System.SkinUI.guid = params.guid
+    RPG_System.SkinUI.name = ""
+    RPG_System.SkinUI.front = ""
+    RPG_System.SkinUI.back = ""
+    UI.setAttribute("SkinNameInput", "text", "")
+    UI.setAttribute("SkinFrontInput", "text", "")
+    UI.setAttribute("SkinBackInput", "text", "")
+    UI.setAttribute("SkinPanel", "visibility", params.color)
+    UI.setAttribute("SkinPanel", "active", "true")
 end
-function onScriptingButtonUp(index, player_color)
-    if not KeysPressed[player_color] then KeysPressed[player_color] = {} end
-    KeysPressed[player_color][index] = false
+function onEditName(p, v) RPG_System.SkinUI.name = v end
+function onEditFront(p, v) RPG_System.SkinUI.front = v end
+function onEditBack(p, v) RPG_System.SkinUI.back = v end
+function submitAddSkin(player)
+    local s = RPG_System.SkinUI
+    if player.color ~= s.activeFor then return end
+    if not s.name or s.name == "" then s.name = "Skin " .. (RPG_System.SkinData[s.guid] and #RPG_System.SkinData[s.guid].skins + 1 or 2) end
+    addSkin({guid = s.guid, name = s.name, front = s.front, back = s.back})
+    UI.setAttribute("SkinPanel", "active", "false")
 end
-function cycleToken(player_color, direction)
-    if #RegisteredTokens == 0 then return end
+function cancelAddSkin() UI.setAttribute("SkinPanel", "active", "false") end
+function addSkin(params)
+    local guid = params.guid
+    if not params.front or params.front == "" then broadcastToAll("Frente obrigatória!", {1,0,0}); return end
+    local back = (not params.back or params.back == "") and params.front or params.back
+    if not RPG_System.SkinData[guid] then
+        local t = getObjectFromGUID(guid)
+        if not t then return end
+        local cust = t.getCustomObject() or {}
+        RPG_System.SkinData[guid] = { skins = {{name="Original", front=cust.image or "", back=cust.image_bottom or ""}}, index = 1 }
+    end
+    table.insert(RPG_System.SkinData[guid].skins, {name=params.name, front=params.front, back=back})
+    broadcastToAll("✨ Skin '".. params.name .."' Salva!", {1, 0.8, 0})
     
-    CurrentTokenIndex = CurrentTokenIndex + direction
-    if CurrentTokenIndex > #RegisteredTokens then CurrentTokenIndex = 1 end
-    if CurrentTokenIndex < 1 then CurrentTokenIndex = #RegisteredTokens end
-    
-    local next_guid = RegisteredTokens[CurrentTokenIndex]
-    toggleFollowCamera({player_color = player_color, target_guid = next_guid}, true)
+    -- Refresh Manager if open
+    if UI.getAttribute("SkinManagerPanel", "active") == "true" then
+        openSkinManager({color = RPG_System.SkinUI.activeFor, guid = guid})
+    end
 end
--- Loop Principal
-function gameLoop()
-    processMovement()
-    updateCameraRPG()
+-- Gerenciador de Skins
+function openSkinManager(params)
+    local guid = params.guid
+    if not RPG_System.SkinData[guid] then
+        local t = getObjectFromGUID(guid)
+        if not t then return end
+        local cust = t.getCustomObject() or {}
+        RPG_System.SkinData[guid] = { skins = {{name="Original", front=cust.image or "", back=cust.image_bottom or ""}}, index = 1 }
+    end
+    
+    local sd = RPG_System.SkinData[guid]
+    local rows = ""
+    for i, skin in ipairs(sd.skins) do
+        local color = (i == sd.index) and "#33CC33" or "#FFFFFF"
+        rows = rows .. [[
+        <HorizontalLayout height="40" spacing="10">
+            <Text text="]].. i ..[[. ]].. skin.name ..[[" color="]].. color ..[[" fontSize="14" alignment="MiddleLeft" preferredWidth="200"/>
+            <Button text="Selecionar" onClick="applySkinFromManager(]].. i ..[[,]].. guid ..[[)" color="#4444AA" preferredWidth="80"/>
+            ]] .. (i > 1 and [[<Button text="Excluir" onClick="deleteSkinFromManager(]].. i ..[[,]].. guid ..[[)" color="#AA4444" preferredWidth="60"/>]] or [[<Panel preferredWidth="60"/>]]) .. [[
+        </HorizontalLayout>
+        ]]
+    end
+    
+    UI.setXmlTable(UI.getXmlTable()) -- Refresh XML state before partial update? Sometimes needed in TTS.
+    UI.setXml(UI.getXml():gsub('<VerticalLayout id="SkinListContainer" spacing="5">.-</VerticalLayout>', '<VerticalLayout id="SkinListContainer" spacing="5">'.. rows ..'</VerticalLayout>'))
+    
+    UI.setAttribute("SkinManagerPanel", "visibility", params.color)
+    UI.setAttribute("SkinManagerPanel", "active", "true")
+end
+function applySkinFromManager(player, index_guid_str)
+    -- index_guid_str vem como "index,guid" devido ao limite de argumentos do onClick em XML
+    local parts = {}
+    for i in string.gmatch(index_guid_str, "[^,]+") do table.insert(parts, i) end
+    local index = tonumber(parts[1])
+    local guid = parts[2]
+    
+    local sd = RPG_System.SkinData[guid]
+    if not sd or not sd.skins[index] then return end
+    
+    sd.index = index
+    local nSkin = sd.skins[index]
+    local t = getObjectFromGUID(guid)
+    if t then
+        local c = t.getCustomObject() or {}
+        c.image, c.image_bottom = nSkin.front, nSkin.back
+        t.setCustomObject(c)
+        t.call("prepareMigration")
+        t.reload()
+        broadcastToColor("🎭 Vistindo: " .. nSkin.name, player.color, {0.5, 1, 0.5})
+    end
+    UI.setAttribute("SkinManagerPanel", "active", "false")
+end
+function deleteSkinFromManager(player, index_guid_str)
+    local parts = {}
+    for i in string.gmatch(index_guid_str, "[^,]+") do table.insert(parts, i) end
+    local index = tonumber(parts[1])
+    local guid = parts[2]
+    
+    if index == 1 then return end -- Protege original
+    
+    local sd = RPG_System.SkinData[guid]
+    table.remove(sd.skins, index)
+    if sd.index >= index and sd.index > 1 then sd.index = sd.index - 1 end
+    
+    broadcastToColor("🗑️ Skin removida.", player.color, {1, 0.5, 0.5})
+    -- Refresh menu
+    openSkinManager({color = player.color, guid = guid})
+end
+function closeSkinManager() UI.setAttribute("SkinManagerPanel", "active", "false") end
+function cycleSkin(color)
+    local guid = RPG_System.Camera.target_guid
+    if not guid then return end
+    local sd = RPG_System.SkinData[guid]
+    if not sd or #sd.skins <= 1 then return end
+    sd.index = sd.index + 1
+    if sd.index > #sd.skins then sd.index = 1 end
+    local nSkin = sd.skins[sd.index]
+    local t = getObjectFromGUID(guid)
+    if t then
+        local c = t.getCustomObject() or {}
+        c.image, c.image_bottom = nSkin.front, nSkin.back
+        t.setCustomObject(c)
+        t.call("prepareMigration"); t.reload()
+        broadcastToColor("🎭 Vestindo: " .. nSkin.name, color, {0.5, 1, 0.5})
+    end
+end
+-- =========================================================
+-- COMBATE E MOVIMENTO (V17 - Estável)
+-- =========================================================
+function toggleCombatMode(player)
+    local c = RPG_System.Combat
+    if c.active then c.active = false else
+        if #c.initiativeList == 0 then return end
+        c.active, c.currentTurnIndex, c.currentMovement = true, 1, 0
+        forceTurnSwitch(player.color)
+    end
+    updateUI()
+end
+function endTurn(player)
+    local c = RPG_System.Combat
+    if not c.active then return end
+    c.currentTurnIndex = c.currentTurnIndex + 1
+    if c.currentTurnIndex > #c.initiativeList then c.currentTurnIndex = 1 end
+    c.currentMovement = 0
+    forceTurnSwitch(player.color); updateUI()
+end
+function forceTurnSwitch(player_color)
+    local guid = RPG_System.Combat.initiativeList[RPG_System.Combat.currentTurnIndex]
+    local t = getObjectFromGUID(guid)
+    if t then toggleFollowCamera({player_color = player_color, target_guid = guid}, true) end
 end
 function processMovement()
-    if not CameraRPG.active or not CameraRPG.player_color then return end
-    
-    local p_color = CameraRPG.player_color
-    if not KeysPressed[p_color] then return end
-    
-    local target = getObjectFromGUID(CameraRPG.target_guid)
+    local cam = RPG_System.Camera
+    if not cam.active or not cam.player_color then return end
+    local target = getObjectFromGUID(cam.target_guid)
     if not target then return end
-    local pos = target.getPosition()
-    local rot = target.getRotation()
-    local forward = target.getTransformForward()
-    
-    if KeysPressed[p_color][1] then target.setPosition({pos.x + forward.x * MoveConfig.speed, pos.y, pos.z + forward.z * MoveConfig.speed}); pos = target.getPosition() end
-    if KeysPressed[p_color][2] then target.setPosition({pos.x - forward.x * MoveConfig.speed, pos.y, pos.z - forward.z * MoveConfig.speed}); pos = target.getPosition() end
-    if KeysPressed[p_color][3] then target.setRotation({rot.x, rot.y - MoveConfig.rotSpeed, rot.z}) end
-    if KeysPressed[p_color][4] then target.setRotation({rot.x, rot.y + MoveConfig.rotSpeed, rot.z}) end
-    if KeysPressed[p_color][6] then target.setPosition({pos.x, pos.y + MoveConfig.liftSpeed, pos.z}) end
-end
-function updateCameraRPG()
-    if not CameraRPG.active or not CameraRPG.target_guid or not CameraRPG.player_color then return end
-    
-    local target = getObjectFromGUID(CameraRPG.target_guid)
-    if not target then
-        CameraRPG.active = false
-        return
+    local keys = RPG_System.KeysPressed[cam.player_color]
+    if not keys then return end
+    local pos, rot, fwd = target.getPosition(), target.getRotation(), target.getTransformForward()
+    local spd, c = RPG_System.MoveConfig.speed, RPG_System.Combat
+    local can = (not c.active) or (cam.target_guid == c.initiativeList[c.currentTurnIndex] and c.currentMovement < c.maxMovement)
+    local dP, dR = {x=0, y=0, z=0}, 0
+    local mP, mR = false, false
+    if can then
+        if keys[1] then dP.x=dP.x+fwd.x*spd; dP.z=dP.z+fwd.z*spd; mP=true end
+        if keys[2] then dP.x=dP.x-fwd.x*spd; dP.z=dP.z-fwd.z*spd; mP=true end
+        if keys[6] then dP.y=dP.y+RPG_System.MoveConfig.liftSpeed; mP=true end
     end
-    local pos = target.getPosition()
-    local rot = target.getRotation()
-    
-    local angle = math.rad(rot.y)
-    local offsetX = CameraRPG.offset.z * math.sin(angle) + CameraRPG.offset.x * math.cos(angle)
-    local offsetZ = CameraRPG.offset.z * math.cos(angle) - CameraRPG.offset.x * math.sin(angle)
-    
-    local targetPos = {pos.x + offsetX, pos.y + CameraRPG.offset.y, pos.z + offsetZ}
-    
-    if CameraRPG.currentPos[1] == 0 then CameraRPG.currentPos = targetPos end
-    for i=1,3 do
-        CameraRPG.currentPos[i] = CameraRPG.currentPos[i] + (targetPos[i] - CameraRPG.currentPos[i]) * CameraRPG.lerpSpeed
-    end
-    
-    local diff = rot.y - CameraRPG.currentYaw
-    if diff > 180 then diff = diff - 360 elseif diff < -180 then diff = diff + 360 end
-    CameraRPG.currentYaw = CameraRPG.currentYaw + diff * CameraRPG.lerpSpeed
-    Player[CameraRPG.player_color].lookAt({
-        position = CameraRPG.currentPos,
-        pitch    = CameraRPG.pitch,
-        yaw      = CameraRPG.currentYaw,
-        distance = 0
-    })
-end
--- Gerenciador de Ativação
-function toggleFollowCamera(params, force_on)
-    if not params or not params.player_color or not params.target_guid then return end
-    
-    if not force_on and CameraRPG.active and CameraRPG.target_guid == params.target_guid then
-        CameraRPG.active = false
-        broadcastToColor("Modo RPG: DESATIVADO", params.player_color, {1, 1, 1})
-    else
-        CameraRPG.active = true
-        CameraRPG.target_guid = params.target_guid
-        CameraRPG.player_color = params.player_color
-        
-        local t = getObjectFromGUID(params.target_guid)
-        if t then 
-            CameraRPG.currentPos = t.getPosition()
-            CameraRPG.currentYaw = t.getRotation().y 
-            broadcastToColor("Controlando: " .. t.getName(), params.player_color, {0, 1, 0})
+    if keys[3] then dR = dR - RPG_System.MoveConfig.rotSpeed; mR=true end
+    if keys[4] then dR = dR + RPG_System.MoveConfig.rotSpeed; mR=true end
+    if mP then target.setPosition({pos.x + dP.x, pos.y + dP.y, pos.z + dP.z})
+        if c.active and c.lastPos then
+            local np = target.getPosition()
+            c.currentMovement = c.currentMovement + math.sqrt((np.x - c.lastPos.x)^2 + (np.z - c.lastPos.z)^2)
+            c.lastPos = np; updateUI()
+        end
+    elseif c.active then c.lastPos = target.getPosition() end
+    if mR then target.setRotation({rot.x, rot.y + dR, rot.z}) end
+    if (mP or mR) and #RPG_System.Party > 0 then
+        for _, pg in ipairs(RPG_System.Party) do
+            if pg ~= cam.target_guid then
+                local po = getObjectFromGUID(pg)
+                if po then
+                    local pP, pR = po.getPosition(), po.getRotation()
+                    if mP then po.setPosition({pP.x + dP.x, pP.y + dP.y, pP.z + dP.z}) end
+                    if mR then po.setRotation({pR.x, pR.y + dR, pR.z}) end
+                end
+            end
         end
     end
 end
+function onScriptingButtonDown(index, player_color)
+    local color = tostring(player_color)
+    if not RPG_System.KeysPressed[color] then RPG_System.KeysPressed[color] = {} end
+    RPG_System.KeysPressed[color][index] = true
+    pcall(function()
+        if not RPG_System.Combat.active then
+            if index == 7 then cycleToken(color, -1) elseif index == 8 then cycleToken(color, 1) end
+        else
+            if index == 7 then toggleCombatMode({color = color}) elseif index == 8 then endTurn({color = color}) end
+        end
+        if index == 9 then cycleSkin(color) end 
+    end)
+end
+function onScriptingButtonUp(i, c) if RPG_System.KeysPressed[tostring(c)] then RPG_System.KeysPressed[tostring(c)][i] = false end end
+function gameLoop() pcall(processMovement); pcall(updateCameraRPG) end
+function updateCameraRPG()
+    local cam = RPG_System.Camera
+    if not cam.active or not cam.target_guid then return end
+    local t = getObjectFromGUID(cam.target_guid)
+    local p = Player[cam.player_color]
+    if not t or not p or not p.seated then return end
+    local pos, rot = t.getPosition(), t.getRotation()
+    local rad = math.rad(rot.y)
+    local tP = {pos.x + cam.offset.z*math.sin(rad) + cam.offset.x*math.cos(rad), pos.y + cam.offset.y, pos.z + cam.offset.z*math.cos(rad) - cam.offset.x*math.sin(rad)}
+    if cam.currentPos[1] == 0 then cam.currentPos = tP end
+    for i=1,3 do cam.currentPos[i] = cam.currentPos[i] + (tP[i] - cam.currentPos[i]) * cam.lerpSpeed end
+    local dif = rot.y - cam.currentYaw
+    if dif > 180 then dif = dif - 360 elseif dif < -180 then dif = dif + 360 end
+    cam.currentYaw = cam.currentYaw + dif * cam.lerpSpeed
+    p.lookAt({position = cam.currentPos, pitch = cam.pitch, yaw = cam.currentYaw, distance = 0})
+end
+function cycleToken(color, dir)
+    local tk = RPG_System.RegisteredTokens
+    if #tk == 0 then return end
+    local cI = 1
+    for i, g in ipairs(tk) do if g == RPG_System.Camera.target_guid then cI = i; break end end
+    local nI = cI + dir
+    if nI > #tk then nI = 1 elseif nI < 1 then nI = #tk end
+    toggleFollowCamera({player_color = color, target_guid = tk[nI]}, true)
+end
+function toggleFollowCamera(ps, f)
+    local cam = RPG_System.Camera
+    if not f and cam.active and cam.target_guid == ps.target_guid then cam.active = false else
+        local t = getObjectFromGUID(ps.target_guid)
+        if t then cam.active, cam.target_guid, cam.player_color, cam.currentPos, cam.currentYaw = true, ps.target_guid, ps.player_color, t.getPosition(), t.getRotation().y end
+    end
+end
+function addToParty(p) for _, g in ipairs(RPG_System.Party) do if g == p.guid then return end end table.insert(RPG_System.Party, p.guid); broadcastToAll("Agrupado.", {0.5, 0.8, 1}) end
+function removeFromParty(p) for i, g in ipairs(RPG_System.Party) do if g == p.guid then table.remove(RPG_System.Party, i); break end end end
+function onUpdateMaxMove(p, v) RPG_System.Combat.maxMovement = tonumber(v) or 30 end
+function addIdToInitiative(p) table.insert(RPG_System.Combat.initiativeList, p.guid) end
+function removeIdFromInitiative(p) for i, g in ipairs(RPG_System.Combat.initiativeList) do if g == p.guid then table.remove(RPG_System.Combat.initiativeList, i); break end end end
+function updateMaxMove(p, v) RPG_System.Combat.maxMovement = tonumber(v) or 30 end
