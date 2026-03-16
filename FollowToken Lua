@@ -1,22 +1,36 @@
 -- FollowToken.lua
--- Script RPG Cinematográfico (RE Style) + Registro de Troca
-function onLoad()
-    print("Sistema RPG carregado no token: " .. self.getGUID())
+-- Sistema TTRPG V17: Token de RPG + Party + Skins (Gerenciador)
+function onLoad(save_state)
+    local myGUID = self.getGUID()
+    local oldGUID = self.getMemo()
+    if oldGUID ~= "" and oldGUID ~= myGUID then
+        Global.call("registerToken", {guid = myGUID, old_guid = oldGUID})
+        self.setMemo("")
+    else
+        Global.call("registerToken", {guid = myGUID})
+    end
     
-    -- Registro Automático no Sistema Global para troca de personagens
-    Global.call("registerToken", {guid = self.getGUID()})
-    
-    -- Opção para ativação manual
-    self.addContextMenuItem("Modo RPG: On/Off", function(p_color)
-        Global.call("toggleFollowCamera", {player_color = p_color, target_guid = self.getGUID()})
+    self.addContextMenuItem("Modo RPG: On/Off", function(p)
+        Global.call("toggleFollowCamera", {player_color = p, target_guid = self.getGUID()})
     end)
     
-    -- Atalho para voltar para visão de jogo padrão do TTS
-    self.addContextMenuItem("Resetar Câmera", function(p_color)
-        Player[p_color].lookAt({position = {0, 0, 0}, pitch = 45, yaw = 0, distance = 40})
+    self.addContextMenuItem("Adicionar à Iniciativa", function()
+        Global.call("addIdToInitiative", {guid = self.getGUID()})
+    end)
+    self.addContextMenuItem("Juntar ao Grupo (Party)", function()
+        Global.call("addToParty", {guid = self.getGUID()})
+    end)
+    self.addContextMenuItem("Separar do Grupo", function()
+        Global.call("removeFromParty", {guid = self.getGUID()})
+    end)
+    self.addContextMenuItem("Adicionar Nova Skin", function(p)
+        Global.call("openSkinPanel", {color = p, guid = self.getGUID()})
+    end)
+    
+    self.addContextMenuItem("Gerenciar Skins", function(p)
+        Global.call("openSkinManager", {color = p, guid = self.getGUID()})
     end)
 end
-function onDestroy()
-    -- Remove o token da lista de troca ao ser deletado
-    Global.call("unregisterToken", {guid = self.getGUID()})
+function prepareMigration()
+    self.setMemo(self.getGUID())
 end
